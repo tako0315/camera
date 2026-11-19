@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>落石よけ</title>
+<style>
+  html,body{margin:0;height:100%;background:#12100e;color:#efe9de;font-family:"Hiragino Sans","Yu Gothic",Meiryo,sans-serif;overflow:hidden}
+  #stage{position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+  canvas{max-width:100%;max-height:100%;aspect-ratio:16/9;background:#1d1a17}
+  #ov{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(18,16,14,.9);overflow:auto;padding:20px;box-sizing:border-box}
+  #ov.hide{display:none}
+  .panel{display:flex;flex-direction:column;align-items:center;gap:16px;text-align:center;max-width:760px;width:100%}
+  .panel[hidden]{display:none}
+  h1{margin:0;font-size:clamp(28px,5vw,46px);letter-spacing:.04em}
+  p{margin:0;max-width:620px;line-height:1.8;color:#cfc7b8;font-size:15px}
+  p.small{font-size:13px;color:#a99f8e;min-height:1.2em}
+  button{font:inherit;font-weight:700;font-size:20px;padding:13px 36px;border:0;border-radius:10px;background:#ffb43a;color:#241703;cursor:pointer}
+  button:disabled{opacity:.5;cursor:wait}
+  button:focus-visible,input:focus-visible{outline:3px solid #fff;outline-offset:3px}
+  button.sub{background:#3a342d;color:#efe9de}
+  #modes{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;width:100%}
+  button.mode{display:flex;flex-direction:column;gap:6px;align-items:flex-start;text-align:left;padding:14px;font-size:14px;font-weight:500;background:#2a2520;color:#efe9de;border:2px solid #3f382f}
+  button.mode strong{font-size:20px}
+  button.mode span{color:#c7bda9;line-height:1.5}
+  button.mode em{font-style:normal;color:#ffb43a;font-size:13px}
+  button.mode.on{border-color:#ffb43a;background:#3a2f1c}
+  .opts{display:flex;flex-wrap:wrap;gap:18px;justify-content:center;align-items:center;font-size:15px}
+  .opts label{display:flex;gap:6px;align-items:center}
+  #big{font-size:clamp(36px,7vw,72px);font-weight:800;color:#ffb43a;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}
+  #mute{position:absolute;right:12px;bottom:12px;padding:8px 14px;font-size:15px;background:rgba(0,0,0,.55);color:#fff}
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="cv" width="1280" height="720"></canvas>
+  <button id="mute" class="sub" type="button" aria-label="音の切り替え(Mキー)">音 ON</button>
+  <div id="ov">
+    <div class="panel" id="menu">
+      <h1>落石よけ</h1>
+      <p>カメラから2〜3m離れて、頭から腰(できれば足まで)が映るように立ちます。落ちてくる岩を横に動いたりしゃがんだりしてよけ、ハートを取ってライフを回復しましょう。体の中心線(頭→肩→腰→膝→足首)が当たり判定です。映像は端末内だけで処理され、外部には送信されません。</p>
+      <div id="modes"></div>
+      <div class="opts">
+        <label><input type="checkbox" id="optBgm" checked>BGM</label>
+        <label><input type="checkbox" id="optSe" checked>効果音</label>
+        <label>音量 <input type="range" id="optVol" min="0" max="100" value="60"></label>
+      </div>
+      <button id="btn" type="button">カメラを開始</button>
+      <p class="small" id="msg"></p>
+    </div>
+    <div class="panel" id="result" hidden>
+      <h1 id="ttl">ゲームオーバー</h1>
+      <div id="big"></div>
+      <p id="txt"></p>
+      <div class="row">
+        <button id="again" type="button">もう一度</button>
+        <button id="toMenu" class="sub" type="button">設定に戻る</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ハンズフリー キット: カメラが ついたあとは パソコンに さわらなくても あそべるようにする
+   ・HF.gate(steps, start) … はじめての ときだけ れんしゅう(チュートリアル)を して、できたら start() を よぶ
+   ・手を ボタンに かさねて まつと そのボタンを おせる(menu() が true の あいだ) */
+(function () {
+  "use strict";
+  if (window.HF) return;
+  const HF = (window.HF = { done: false, running: false });
+  const doneKeys = {};
+  const kind = () => (typeof opt.kind === "function" ? opt.kind() : opt.kind);
+  let opt = null, cv, g, box, stepEl, msgEl, fill, okEl, hint;
+  let steps = [], idx = 0, S = null, wait = 0, onDone = null, lost = false, lastTs = 0;
+  let hovBtn = null, hovT = 0, block = 0, lastMenu = false, parts = [];
+  const HOVER = 1.3;
+
+  const css = `
+#hfCv{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:9998}
+#hfBox{position:fixed;left:50%;top:3vh;transform:translateX(-50%);z-index:9999;display:none;pointer-events:none;
+  background:rgba(24,28,33,.82);color:#fff;border:1px solid rgba(255,255,255,.15);border-radius:18px;
+  padding:12px 22px 16px;width:max-content;max-width:min(94vw,640px);text-align:center;
+  font-family:"Hiragino Maru Gothic ProN","BIZ UDPGothic","Yu Gothic UI","Meiryo",sans-serif;font-weight:700;
+  box-shadow:0 8px 24px rgba(0,0,0,.3)}
+#hfStep{font-size:clamp(13px,2.6vmin,16px);color:#e0c88c;letter-spacing:.1em;margin-bottom:4px}
+#hfMsg{font-size:clamp(18px,4.6vmin,32px);line-height:1.45}
+#hfMsg b{color:#ffe08a}
+#hfBar{width:min(60vw,340px);height:10px;border-radius:8px;background:rgba(255,255,255,.25);margin:12px auto 0;overflow:hidden}
+#hfFill{height:100%;width:0;border-radius:8px;background:#e0c88c}
+#hfOk{position:fixed;left:0;right:0;top:40%;text-align:center;z-index:9999;pointer-events:none;opacity:0;
+  font:900 clamp(40px,12vmin,90px) "Hiragino Maru Gothic ProN","BIZ UDPGothic","Meiryo",sans-serif;color:#ffd75e;
+  text-shadow:0 3px 14px rgba(0,0,0,.6)}
+#hfOk.pop{animation:hfPop .9s ease-out forwards}
+@keyframes hfPop{0%{opacity:0;transform:scale(.6)}20%{opacity:1;transform:scale(1.1)}70%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(1)}}
+#hfHint{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);z-index:9999;display:none;pointer-events:none;
+  background:rgba(24,28,33,.82);color:#ffe08a;border-radius:999px;padding:8px 16px;white-space:nowrap;
+  font:700 clamp(12px,2.4vmin,15px) "Hiragino Maru Gothic ProN","BIZ UDPGothic","Meiryo",sans-serif}
+.hf-hov{outline:4px solid #ffd75e !important;outline-offset:3px}`;
+
+  /* ---------- じゅんび ---------- */
+  HF.setup = function (o) {
+    opt = Object.assign({ kind: "pose", mirror: true }, o);
+    const st = document.createElement("style"); st.textContent = css; document.head.appendChild(st);
+    document.body.insertAdjacentHTML("beforeend",
+      `<canvas id="hfCv"></canvas><div id="hfBox"><div id="hfStep"></div><div id="hfMsg"></div>` +
+      `<div id="hfBar"><div id="hfFill"></div></div></div><div id="hfOk"></div>` +
+      `<div id="hfHint">✋ 手を ボタンに かさねて すこし まつと えらべるよ</div>`);
+    cv = document.getElementById("hfCv"); g = HF.ctx = cv.getContext("2d");
+    box = document.getElementById("hfBox"); stepEl = document.getElementById("hfStep");
+    msgEl = document.getElementById("hfMsg"); fill = document.getElementById("hfFill");
+    okEl = document.getElementById("hfOk"); hint = document.getElementById("hfHint");
+    const rs = () => { cv.width = innerWidth; cv.height = innerHeight; };
+    addEventListener("resize", rs); rs();
+    addEventListener("pointerdown", initAudio, true);
+    addEventListener("keydown", initAudio, true);
+    requestAnimationFrame(loop);
+  };
+
+  /* ---------- ざひょう(がめんの CSS ピクセル) ---------- */
+  function defMap(l) {
+    const v = opt.video, W = innerWidth, H = innerHeight;
+    const vw = (v && v.videoWidth) || 640, vh = (v && v.videoHeight) || 480;
+    const s = Math.max(W / vw, H / vh), dw = vw * s, dh = vh * s;
+    const x = (W - dw) / 2 + l.x * dw, y = (H - dh) / 2 + l.y * dh;
+    return { x: opt.mirror ? W - x : x, y };
+  }
+  const map = (l) => (opt.map ? opt.map(l) : defMap(l));
+  const raw = () => { try { return opt.landmarks() || null; } catch (e) { return null; } };
+  HF.u = () => Math.min(innerWidth, innerHeight) / 100;
+
+  HF.pose = function () {
+    const lm = raw();
+    if (!lm || lm.length < 17) return null;
+    const vis = (i) => (lm[i].visibility != null ? lm[i].visibility : lm[i].v != null ? lm[i].v : 1) > 0.5;
+    if (!vis(11) || !vis(12)) return null;
+    const P = (i) => map(lm[i]);
+    const p = { nose: P(0), Ls: P(11), Rs: P(12), Le: P(13), Re: P(14), Lw: P(15), Rw: P(16) };
+    p.unit = Math.hypot(p.Ls.x - p.Rs.x, p.Ls.y - p.Rs.y);
+    if (p.unit < HF.u() * 3) return null;
+    p.cx = (p.Ls.x + p.Rs.x) / 2; p.cy = (p.Ls.y + p.Rs.y) / 2;
+    const palm = (e, w) => ({ x: w.x + (w.x - e.x) * 0.3, y: w.y + (w.y - e.y) * 0.3 });
+    p.Lh = palm(p.Le, p.Lw); p.Rh = palm(p.Re, p.Rw);
+    return p;
+  };
+  HF.hand = function () {
+    const lm = raw();
+    if (!lm || lm.length < 21) return null;
+    return lm.map(map);
+  };
+  HF.face = function () {
+    const lm = raw();
+    if (!lm || lm.length < 300) return null;
+    return lm.map(map);
+  };
+  /* 0 = グー, 1 = チョキ, 2 = パー */
+  HF.gesture = function () {
+    const h = HF.hand();
+    if (!h) return null;
+    const d = (a, b) => Math.hypot(h[a].x - h[b].x, h[a].y - h[b].y);
+    const ext = (tip, pip) => d(tip, 0) > d(pip, 0) * 1.1;
+    const i = ext(8, 6), m = ext(12, 10), r = ext(16, 14), p = ext(20, 18);
+    if (!i && !m && !r && !p) return 0;
+    if (i && m && !r && !p) return 1;
+    if (i && m && r && p) return 2;
+    return null;
+  };
+  HF.present = function () {
+    if (opt.present) return !!opt.present();
+    return kind() === "pose" ? !!HF.pose() : kind() === "hand" ? !!HF.hand() : !!HF.face();
+  };
+  function pointers() {
+    if (opt.pointers) return opt.pointers() || [];
+    if (kind() === "pose") { const p = HF.pose(); return p ? [p.Lh, p.Rh] : []; }
+    if (kind() === "hand") { const h = HF.hand(); return h ? [h[8]] : []; }
+    const f = HF.face(); return f ? [f[1]] : [];        // かお: はなの さき
+  }
+
+  /* ---------- えがく どうぐ ---------- */
+  HF.emoji = function (ch, x, y, size) {
+    g.save();
+    g.font = `${size}px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif`;
+    g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(ch, x, y);
+    g.restore();
+  };
+  HF.circle = function (x, y, r, color, width) {
+    g.lineWidth = width || 4; g.strokeStyle = color || "#fff";
+    g.beginPath(); g.arc(x, y, r, 0, 6.3); g.stroke();
+  };
+  HF.burst = function (x, y, color, n) {
+    for (let i = 0; i < (n || 12); i++) {
+      const a = Math.random() * 6.283, s = (20 + Math.random() * 50) * HF.u();
+      parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.6, color: color || "#ffd75e" });
+    }
+  };
+  HF.hold = (S, ok, dt, need, key) => {
+    key = key || "h";
+    S[key] = ok ? (S[key] || 0) + dt : Math.max(0, (S[key] || 0) - dt * 1.5);
+    return S[key] / need;
+  };
+  HF.near = (a, b, r) => !!a && !!b && Math.hypot(a.x - b.x, a.y - b.y) < r;
+
+  /* ---------- おと と こえ ---------- */
+  let actx = null;
+  function initAudio() {
+    try {
+      if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+      if (actx.state === "suspended") actx.resume();
+    } catch (e) {}
+  }
+  function tone(f, t, d, type, v) {
+    const o = actx.createOscillator(), gn = actx.createGain();
+    o.type = type || "sine"; o.frequency.setValueAtTime(f, t);
+    gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(v || 0.18, t + 0.01);
+    gn.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    o.connect(gn); gn.connect(actx.destination); o.start(t); o.stop(t + d + 0.02);
+  }
+  HF.sfx = function (k) {
+    if (!actx || actx.state !== "running") return;
+    const t = actx.currentTime;
+    if (k === "ok") { tone(1318.5, t, 0.12); tone(1568, t + 0.08, 0.12); tone(2093, t + 0.16, 0.25); }
+    else if (k === "pop") { tone(500, t, 0.09, "square", 0.08); tone(1300, t + 0.04, 0.08, "square", 0.06); }
+    else if (k === "miss") tone(200, t, 0.25, "sawtooth", 0.1);
+    else if (k === "click") { tone(988, t, 0.08); tone(1318.5, t + 0.07, 0.2); }
+    else tone(880, t, 0.08, "square", 0.06);
+  };
+  let jaVoice = null;
+  function pickVoice() {
+    try {
+      const vs = speechSynthesis.getVoices().filter((v) => /^ja/i.test(v.lang));
+      jaVoice = vs.find((v) => v.localService) || vs[0] || null;
+    } catch (e) {}
+  }
+  if (window.speechSynthesis) { pickVoice(); speechSynthesis.addEventListener && speechSynthesis.addEventListener("voiceschanged", pickVoice); }
+  HF.say = function (text) {
+    try {
+      if (!window.speechSynthesis) return;
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(String(text).replace(/<br>/g, " ").replace(/<[^>]+>/g, ""));
+      u.lang = "ja-JP"; if (jaVoice) u.voice = jaVoice; u.rate = 1.1; u.pitch = 1.2;
+      speechSynthesis.speak(u);
+    } catch (e) {}
+  };
+
+  /* ---------- チュートリアル ---------- */
+  let curKey = "main";
+  HF.gate = function (list, start, key) {
+    key = key || "main";
+    if (doneKeys[key] || !list || !list.length) { start(); return; }
+    if (HF.running) return;
+    steps = list; onDone = start; idx = -1; HF.running = true; curKey = key;
+    box.style.display = "block";
+    if (opt.onTutorial) opt.onTutorial(true);
+    next();
+  };
+  HF.cancel = function () {
+    if (!HF.running) return;
+    HF.running = false; onDone = null; box.style.display = "none";
+    if (opt.onTutorial) opt.onTutorial(false);
+    try { speechSynthesis.cancel(); } catch (e) {}
+  };
+  HF.skip = function () { if (HF.running) { idx = steps.length - 1; wait = 0.01; } };
+  function next() {
+    idx++;
+    if (idx >= steps.length) {
+      HF.running = false; HF.done = doneKeys[curKey] = true; box.style.display = "none";
+      g.clearRect(0, 0, cv.width, cv.height);
+      if (opt.onTutorial) opt.onTutorial(false);
+      HF.say("じゅんび オーケー! はじめるよ");
+      const f = onDone; onDone = null; f && f();
+      return;
+    }
+    const s = steps[idx];
+    S = { t: 0 }; wait = 0; lost = false;
+    if (s.init) s.init(S);
+    stepEl.textContent = `れんしゅう ${idx + 1} / ${steps.length}`;
+    msgEl.innerHTML = s.text; fill.style.width = "0%";
+    HF.say(s.say || s.text);
+  }
+  function lostText() {
+    return opt.lostText || (kind() === "pose" ? "カメラから すこし はなれて<br>からだを うつしてね"
+      : kind() === "hand" ? "手を カメラに 見せてね" : "かおを カメラに うつしてね");
+  }
+  function pop(text) { okEl.textContent = text; okEl.className = ""; void okEl.offsetWidth; okEl.className = "pop"; }
+
+  function drawPointers(pts, hp) {
+    for (const p of pts) {
+      g.lineWidth = 4; g.strokeStyle = "#fff"; g.fillStyle = "rgba(255,255,255,.25)";
+      g.beginPath(); g.arc(p.x, p.y, 18, 0, 6.3); g.fill(); g.stroke();
+      if (p === hp) {
+        g.lineWidth = 7; g.strokeStyle = "#ffd75e";
+        g.beginPath(); g.arc(p.x, p.y, 26, -Math.PI / 2, -Math.PI / 2 + 6.283 * Math.min(1, hovT / HOVER)); g.stroke();
+      }
+    }
+  }
+
+  /* ---------- 手で ボタンを おす ---------- */
+  function visibleButtons() {
+    if (opt.buttons) return opt.buttons().filter(Boolean);
+    return Array.from(document.querySelectorAll("button")).filter((b) => {
+      if (b.disabled || b.dataset.noair != null || !b.offsetParent) return false;
+      const r = b.getBoundingClientRect();
+      if (r.width < 4 || r.height < 4) return false;
+      const e = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return e === b || b.contains(e);
+    });
+  }
+  function clearHov() { if (hovBtn) hovBtn.classList.remove("hf-hov"); hovBtn = null; hovT = 0; }
+  function menuStep(dt) {
+    let on = false;
+    try { on = !HF.running && !!opt.menu && !!opt.menu(); } catch (e) {}
+    if (on && !lastMenu) block = 1.2;     // がめんが かわった すぐあとは すこし まつ
+    lastMenu = on;
+    hint.style.display = on ? "block" : "none";
+    if (!on) { clearHov(); return; }
+    if (opt.detect) { try { opt.detect(); } catch (e) {} }
+    block = Math.max(0, block - dt);
+    const pts = pointers();
+    let hit = null, hp = null;
+    const bs = visibleButtons();
+    for (const p of pts) for (const b of bs) {
+      const r = b.getBoundingClientRect();
+      if (p.x > r.left - 6 && p.x < r.right + 6 && p.y > r.top - 6 && p.y < r.bottom + 6) { hit = b; hp = p; }
+    }
+    if (block > 0) { hit = null; hp = null; }
+    if (hit !== hovBtn) { clearHov(); hovBtn = hit; if (hit) hit.classList.add("hf-hov"); }
+    if (hit) {
+      hovT += dt;
+      if (hovT >= HOVER) { clearHov(); HF.sfx("click"); block = 1.2; hit.click(); }
+    }
+    drawPointers(pts, hp);
+  }
+
+  /* ---------- ループ ---------- */
+  function loop(ts) {
+    requestAnimationFrame(loop);
+    const dt = Math.min(0.05, (ts - lastTs) / 1000 || 0);
+    lastTs = ts;
+    g.clearRect(0, 0, cv.width, cv.height);
+    if (HF.running) {
+      const s = steps[idx];
+      S.t += dt;
+      if (wait > 0) { wait -= dt; if (wait <= 0) next(); }
+      else {
+        const ok = HF.present();
+        let pr = 0;
+        try { pr = Math.max(0, Math.min(1, Number(s.update(dt, S)) || 0)); } catch (e) { console.error(e); }
+        fill.style.width = pr * 100 + "%";
+        if (!ok !== lost) { lost = !ok; msgEl.innerHTML = ok ? s.text : lostText(); }
+        if (pr >= 1) { wait = 1.1; HF.sfx("ok"); pop(idx + 1 >= steps.length ? "じゅんび OK!" : "できた!"); }
+      }
+      if (opt.showPointers !== false) drawPointers(pointers(), null);
+    }
+    menuStep(dt);
+    for (const p of parts) {
+      p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 120 * HF.u() * dt;
+      g.globalAlpha = Math.max(0, Math.min(1, p.life * 2.5)); g.fillStyle = p.color;
+      g.beginPath(); g.arc(p.x, p.y, HF.u(), 0, 6.3); g.fill();
+    }
+    g.globalAlpha = 1;
+    parts = parts.filter((p) => p.life > 0);
+  }
+})();
+</script>
+<script type="module">
+import {PoseLandmarker, FilesetResolver} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
+
+const WASM  = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const MODEL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
+
+// ---- 調整用の定数 ----
+const W = 1280, H = 720;
+const INVULN = 1.5;       // 被弾後の無敵時間(秒)
+const HIT_SCALE = 0.4;    // 体の当たり判定の太さ(肩幅に対する比率)
+
+// ---- 難易度 ----
+// lives:ライフ / warn:予告時間 / base,grow:落下速度(px/秒)と加速 / sp0,spMin,spGrow:出現間隔
+// aim:体を狙う確率 / diag:斜めに落ちる確率 / multi:同時に2個出る確率 / heal:回復ハートの間隔(秒) / bpm:BGMの速さ
+const MODES = {
+  easy:   {name: 'かんたん',   desc: 'ライフ5。予告が長く、ゆっくり落ちる',               lives: 5, warn: .95, base: 320, grow: 6,  sp0: 1.3, spMin: .55, spGrow: .010, aim: .3,  diag: 0,   multi: 0,  heal: 9,  bpm: 112},
+  normal: {name: 'ふつう',     desc: '標準。体を狙う岩が出る',                           lives: 3, warn: .7,  base: 380, grow: 9,  sp0: 1.0, spMin: .3,  spGrow: .012, aim: .5,  diag: 0,   multi: 0,  heal: 14, bpm: 126},
+  hard:   {name: 'むずかしい', desc: '斜めに落ちる岩が出現。予告が短く、速い',           lives: 3, warn: .5,  base: 480, grow: 12, sp0: .8,  spMin: .22, spGrow: .014, aim: .65, diag: .35, multi: .1, heal: 18, bpm: 140},
+  oni:    {name: '鬼',         desc: 'ライフ2。斜め多め、2個同時、予告ほぼなし',         lives: 2, warn: .35, base: 600, grow: 15, sp0: .65, spMin: .16, spGrow: .016, aim: .8,  diag: .55, multi: .4, heal: 24, bpm: 156}
+};
+let modeKey = 'normal', cfg = MODES.normal;
+
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+const ov = $('ov'), menu = $('menu'), result = $('result'), btn = $('btn'), msg = $('msg');
+const video = document.createElement('video'); video.playsInline = true; video.muted = true;
+
+let landmarker = null, cameraOK = false, camTried = false, state = 'idle'; // idle | ready | play | over
+let rocks = [], parts = [], pops = [], spawnT = 0, healT = 0, tPlay = 0, readyT = 0, lives = 3, invuln = 0, flash = 0, healFlash = 0, best = null;
+let body = null, shoulderW = 160, mouseX = W / 2;
+const slots = {};
+
+const bestOf = k => { try { return parseFloat(localStorage.getItem('rock-best-' + k)) || null; } catch (e) { return null; } };
+
+// ============ 音(外部ファイル不要。WebAudioで生成) ============
+let ac = null, master, bgmG, seG, noiseBuf, timer = null, step = 0, nextT = 0, muted = false;
+const opt = {bgm: true, se: true, vol: .6};
+
+function audioInit() {
+  if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
+  const C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+  ac = new C();
+  master = ac.createGain(); master.connect(ac.destination);
+  bgmG = ac.createGain(); bgmG.connect(master);
+  seG = ac.createGain(); seG.connect(master);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  applyAudio();
+}
+function applyAudio() {
+  if (!ac) return;
+  master.gain.value = muted ? 0 : opt.vol;
+  bgmG.gain.value = opt.bgm ? .55 : 0;
+  seG.gain.value = opt.se ? 1 : 0;
+  $('mute').textContent = muted ? '音 OFF' : '音 ON';
+}
+function tone(f, t, d, type, v, dest, f2) {
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t);
+  if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + d);
+  g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(v, t + .01); g.gain.exponentialRampToValueAtTime(.0001, t + d);
+  o.connect(g); g.connect(dest); o.start(t); o.stop(t + d + .05);
+}
+function noise(t, d, v, type, freq, dest) {
+  const s = ac.createBufferSource(); s.buffer = noiseBuf;
+  const f = ac.createBiquadFilter(); f.type = type; f.frequency.value = freq;
+  const g = ac.createGain(); g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(.0001, t + d);
+  s.connect(f); f.connect(g); g.connect(dest); s.start(t, Math.random() * .5); s.stop(t + d + .05);
+}
+function seHit()  { if (!ac) return; const t = ac.currentTime; noise(t, .35, .9, 'lowpass', 900, seG); tone(160, t, .4, 'sine', 1, seG, 38); tone(260, t, .22, 'sawtooth', .25, seG, 70); }
+function seHeal() { if (!ac) return; const t = ac.currentTime; [660, 880, 1320].forEach((f, i) => tone(f, t + i * .08, .2, 'triangle', .4, seG)); }
+function seWarn(x, heal) {   // 落ちる位置の方向から聞こえる短い合図(左右のステレオ)
+  if (!ac) return;
+  const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+  o.type = 'square'; o.frequency.value = heal ? 1500 : 900;
+  g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(.16, t + .01); g.gain.exponentialRampToValueAtTime(.0001, t + .09);
+  o.connect(g);
+  if (ac.createStereoPanner) { const p = ac.createStereoPanner(); p.pan.value = x / W * 2 - 1; g.connect(p); p.connect(seG); } else g.connect(seG);
+  o.start(t); o.stop(t + .12);
+}
+// BGM: Am - F - C - G の4小節ループ(キック・クラップ・ハット・ベース・アルペジオ)
+const ROOTS = [55, 43.65, 65.41, 49], IV = [[1, 1.189, 1.498], [1, 1.26, 1.498], [1, 1.26, 1.498], [1, 1.26, 1.498]];
+function playStep(s, t) {
+  const bar = (s >> 4) & 3, st = s & 15, root = ROOTS[bar];
+  if (st % 4 === 0) tone(150, t, .18, 'sine', .9, bgmG, 40);
+  if (st === 4 || st === 12) noise(t, .12, .3, 'bandpass', 1800, bgmG);
+  if (st % 2 === 1) noise(t, .04, .1, 'highpass', 7000, bgmG);
+  if ([0, 3, 6, 8, 10, 14].includes(st)) tone(st === 6 || st === 14 ? root * 2 : root, t, .2, 'triangle', .55, bgmG);
+  if (st % 2 === 0) tone(root * 4 * IV[bar][(st / 2) % 3 | 0], t, .12, 'square', .06, bgmG);
+}
+function sched() {
+  const bpm = cfg.bpm + Math.min(20, tPlay * .35);
+  while (nextT < ac.currentTime + .12) { playStep(step, nextT); nextT += 60 / bpm / 4; step = (step + 1) % 64; }
+}
+function bgmStart() { if (!ac || timer) return; step = 0; nextT = ac.currentTime + .08; timer = setInterval(sched, 30); }
+function bgmStop()  { clearInterval(timer); timer = null; }
+
+// ============ 体の軸 ============
+let hfLm = null;   // さいしんの ランドマーク(れんしゅう・手で ボタン よう)
+function readPose(r) {
+  hfLm = r.landmarks.length ? r.landmarks[0] : null;
+  if (!r.landmarks.length) { body = null; return; }
+  const p = r.landmarks[0].map(q => ({x: (1 - q.x) * W, y: q.y * H, v: q.visibility ?? 1}));
+  const ok = i => p[i].v > .4;
+  const mid = (a, b) => ok(a) && ok(b) ? {x: (p[a].x + p[b].x) / 2, y: (p[a].y + p[b].y) / 2} : ok(a) ? p[a] : ok(b) ? p[b] : null;
+  if (ok(11) && ok(12)) shoulderW = shoulderW * .8 + Math.hypot(p[11].x - p[12].x, p[11].y - p[12].y) * .2;
+  const raw = {head: ok(0) ? p[0] : null, sh: mid(11, 12), hip: mid(23, 24), knee: mid(25, 26), ank: mid(27, 28)};
+  if (!raw.sh) { body = null; return; }
+  if (!raw.hip) raw.hip = {x: raw.sh.x, y: raw.sh.y + shoulderW * 1.3};   // 腰が映っていないときは推定
+  const pts = [];
+  for (const k of ['head', 'sh', 'hip', 'knee', 'ank']) {
+    const v = raw[k]; if (!v) { delete slots[k]; continue; }
+    const s = slots[k];
+    slots[k] = s ? {x: s.x + (v.x - s.x) * .6, y: s.y + (v.y - s.y) * .6} : {x: v.x, y: v.y};
+    pts.push(slots[k]);
+  }
+  body = {pts, r: Math.max(24, Math.min(80, shoulderW * HIT_SCALE))};
+}
+function mouseBody() { const x = mouseX; return {pts: [{x, y: 360}, {x, y: 430}, {x, y: 560}, {x, y: 650}], r: 30}; }
+const curBody = () => cameraOK ? body : mouseBody();
+
+function segDist(px, py, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y, l = dx * dx + dy * dy;
+  let t = l ? ((px - a.x) * dx + (py - a.y) * dy) / l : 0; t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (a.x + t * dx), py - (a.y + t * dy));
+}
+function hits(k, b) {
+  const rr = k.r * (k.kind === 'rock' ? .85 : 1) + b.r;
+  if (b.pts.length === 1) return Math.hypot(k.x - b.pts[0].x, k.y - b.pts[0].y) < rr;
+  for (let i = 0; i < b.pts.length - 1; i++) if (segDist(k.x, k.y, b.pts[i], b.pts[i + 1]) < rr) return true;
+  return false;
+}
+
+// ============ 岩とハート ============
+function spawnRock() {
+  const sp = Math.min(1100, cfg.base + tPlay * cfg.grow);
+  const r = 28 + Math.random() * 28, vy = sp * (.85 + Math.random() * .3);
+  let vx = 0;
+  if (Math.random() < cfg.diag) vx = (Math.random() < .5 ? -1 : 1) * vy * (.25 + Math.random() * .25);
+  const b = curBody();
+  const aimX = b && Math.random() < cfg.aim ? b.pts[Math.min(1, b.pts.length - 1)].x + (Math.random() - .5) * 120 : Math.random() * W;
+  const x0 = Math.max(-120, Math.min(W + 120, aimX - vx * (H * .65 / vy)));
+  const verts = Array.from({length: 9}, (_, i) => ({a: i / 9 * Math.PI * 2, k: .78 + Math.random() * .3}));
+  rocks.push({kind: 'rock', x: x0, y: -r, r, vx, vy, warn: cfg.warn, rot: Math.random() * 6, spin: (Math.random() - .5) * 4, verts});
+  seWarn(Math.max(30, Math.min(W - 30, x0)), false);
+}
+function spawnHeal() {
+  const x = 150 + Math.random() * (W - 300);
+  rocks.push({kind: 'heal', x, y: -30, r: 30, vx: 0, vy: Math.max(260, Math.min(1100, cfg.base + tPlay * cfg.grow) * .6), warn: .5, rot: 0, spin: 0});
+  seWarn(x, true);
+}
+
+function reset() {
+  cfg = MODES[modeKey]; best = bestOf(modeKey);
+  rocks = []; parts = []; pops = []; spawnT = 0; healT = cfg.heal * .8; tPlay = 0; readyT = 2.5;
+  lives = cfg.lives; invuln = 0; flash = 0; healFlash = 0; state = 'ready';
+  bgmStart();
+}
+
+function update(dt) {
+  if (state === 'ready') { readyT -= dt; if (readyT <= 0) state = 'play'; return; }
+  const b = curBody();
+  if (cameraOK && !b) return;   // 体が映っていないときは一時停止
+  tPlay += dt; invuln = Math.max(0, invuln - dt); flash = Math.max(0, flash - dt); healFlash = Math.max(0, healFlash - dt);
+  spawnT -= dt;
+  if (spawnT <= 0) {
+    spawnRock(); if (Math.random() < cfg.multi) spawnRock();
+    spawnT = Math.max(cfg.spMin, cfg.sp0 - tPlay * cfg.spGrow) * (.7 + Math.random() * .6);
+  }
+  if (lives < cfg.lives) { healT -= dt; if (healT <= 0) { spawnHeal(); healT = cfg.heal * (.8 + Math.random() * .4); } }
+  rocks.forEach(k => {
+    if (k.warn > 0) { k.warn -= dt; return; }
+    k.x += k.vx * dt; k.y += k.vy * dt; k.rot += k.spin * dt;
+    if (!b || !hits(k, b)) return;
+    if (k.kind === 'heal') {
+      k.dead = true; lives = Math.min(cfg.lives, lives + 1); healFlash = .35; seHeal();
+      pops.push({x: k.x, y: k.y, t: 0, text: '+1', c: '#ff8fb1'});
+    } else if (invuln <= 0) {
+      k.dead = true; lives--; invuln = INVULN; flash = .25; seHit();
+      for (let i = 0; i < 14; i++) parts.push({x: k.x, y: k.y, vx: (Math.random() - .5) * 600, vy: -Math.random() * 400, t: .6, s: 4 + Math.random() * 7});
+      if (lives <= 0) gameOver();
+    }
+  });
+  rocks = rocks.filter(k => !k.dead && k.y < H + 80 && k.x > -300 && k.x < W + 300);
+  parts.forEach(p => { p.t -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 1400 * dt; });
+  parts = parts.filter(p => p.t > 0);
+  pops.forEach(p => { p.t += dt; p.y -= 60 * dt; });
+  pops = pops.filter(p => p.t < .9);
+}
+
+const fmt = t => t.toFixed(1) + ' 秒';
+
+function gameOver() {
+  state = 'over'; bgmStop();
+  const isBest = best === null || tPlay > best;
+  if (isBest) { best = tPlay; try { localStorage.setItem('rock-best-' + modeKey, best); } catch (e) {} }
+  $('ttl').textContent = isBest ? 'ベスト更新!' : 'ゲームオーバー';
+  $('big').textContent = fmt(tPlay);
+  $('txt').textContent = cfg.name + ' ベスト ' + fmt(best);
+  setTimeout(() => { menu.hidden = true; result.hidden = false; ov.classList.remove('hide'); $('again').focus(); }, 700);
+}
+
+// ============ 描画 ============
+function heart(x, y, s) {
+  ctx.beginPath(); ctx.moveTo(x, y + s * .9);
+  ctx.bezierCurveTo(x - s * 1.6, y - s * .2, x - s * .9, y - s * 1.3, x, y - s * .45);
+  ctx.bezierCurveTo(x + s * .9, y - s * 1.3, x + s * 1.6, y - s * .2, x, y + s * .9); ctx.closePath();
+}
+function drawRock(k) {
+  ctx.save(); ctx.translate(k.x, k.y);
+  // 進行方向の残像
+  const sp = Math.hypot(k.vx, k.vy), len = 130;
+  const g = ctx.createLinearGradient(0, 0, -k.vx / sp * len, -k.vy / sp * len);
+  g.addColorStop(0, 'rgba(255,180,58,.35)'); g.addColorStop(1, 'rgba(255,180,58,0)');
+  ctx.strokeStyle = g; ctx.lineWidth = k.r * 1.4; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-k.vx / sp * len, -k.vy / sp * len); ctx.stroke();
+  ctx.rotate(k.rot);
+  ctx.beginPath();
+  k.verts.forEach((v, i) => { const x = Math.cos(v.a) * k.r * v.k, y = Math.sin(v.a) * k.r * v.k; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  ctx.closePath();
+  ctx.shadowColor = 'rgba(255,170,50,.9)'; ctx.shadowBlur = 18;
+  ctx.fillStyle = '#8b8174'; ctx.fill(); ctx.shadowBlur = 0;
+  ctx.lineWidth = 4; ctx.strokeStyle = '#463f35'; ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.22)'; ctx.beginPath(); ctx.ellipse(-k.r * .3, -k.r * .3, k.r * .3, k.r * .18, -.5, 0, 7); ctx.fill();
+  ctx.restore();
+}
+function drawHeal(k) {
+  ctx.save(); ctx.shadowColor = 'rgba(255,120,170,.95)'; ctx.shadowBlur = 24;
+  ctx.fillStyle = '#ff6f9c'; heart(k.x, k.y, k.r); ctx.fill(); ctx.shadowBlur = 0;
+  ctx.lineWidth = 4; ctx.strokeStyle = '#fff'; ctx.stroke(); ctx.restore();
+}
+function drawWarn(k) {
+  const heal = k.kind === 'heal', col = heal ? '255,111,156' : '255,180,58';
+  const pulse = .5 + .5 * Math.abs(Math.sin(k.warn * 14));
+  const x1 = k.x + k.vx * (H + k.r * 2) / k.vy;
+  // 落下コース(帯)
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = `rgba(${col},${(.1 + .14 * pulse).toFixed(3)})`; ctx.lineWidth = k.r * (heal ? 1.6 : 1.8);
+  ctx.beginPath(); ctx.moveTo(k.x, 0); ctx.lineTo(x1, H); ctx.stroke();
+  ctx.strokeStyle = `rgba(${col},${(.35 + .4 * pulse).toFixed(3)})`; ctx.lineWidth = 3; ctx.setLineDash([16, 14]);
+  ctx.beginPath(); ctx.moveTo(k.x, 0); ctx.lineTo(x1, H); ctx.stroke(); ctx.setLineDash([]);
+  // 着地地点
+  ctx.strokeStyle = `rgba(${col},.8)`; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.ellipse(Math.max(20, Math.min(W - 20, x1)), H - 14, k.r * .9, 10, 0, 0, 7); ctx.stroke();
+  // 画面上の警告マーカー
+  const mx = Math.max(34, Math.min(W - 34, k.x));
+  ctx.fillStyle = `rgb(${col})`;
+  ctx.beginPath(); ctx.moveTo(mx, 74); ctx.lineTo(mx - 30, 16); ctx.lineTo(mx + 30, 16); ctx.closePath(); ctx.fill();
+  ctx.textAlign = 'center';
+  if (heal) { ctx.fillStyle = '#fff'; heart(mx, 40, 9); ctx.fill(); }
+  else { ctx.fillStyle = '#241703'; ctx.font = '800 32px sans-serif'; ctx.fillText('!', mx, 58); }
+  if (Math.abs(k.vx) > 1) {   // 斜めの岩は向きの矢印
+    const d = Math.sign(k.vx);
+    ctx.strokeStyle = `rgb(${col})`; ctx.lineWidth = 6; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(mx + d * 38, 36); ctx.lineTo(mx + d * 64, 36); ctx.lineTo(mx + d * 54, 26); ctx.moveTo(mx + d * 64, 36); ctx.lineTo(mx + d * 54, 46); ctx.stroke();
+  }
+}
+
+function draw() {
+  ctx.save(); ctx.translate(W, 0); ctx.scale(-1, 1);
+  if (cameraOK && video.readyState >= 2) ctx.drawImage(video, 0, 0, W, H);
+  ctx.restore();
+  ctx.fillStyle = cameraOK ? 'rgba(22,18,14,.55)' : '#1d1a17'; ctx.fillRect(0, 0, W, H);
+
+  rocks.forEach(k => { if (k.warn > 0) drawWarn(k); });
+  rocks.forEach(k => { if (k.warn <= 0) (k.kind === 'heal' ? drawHeal(k) : drawRock(k)); });
+  ctx.fillStyle = '#9a8f80'; parts.forEach(p => ctx.fillRect(p.x, p.y, p.s, p.s));
+
+  // 体の軸と当たり判定
+  const b = state === 'idle' ? null : curBody();
+  if (b) {
+    const blink = invuln > 0 && Math.floor(invuln * 12) % 2 === 0;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.strokeStyle = blink ? 'rgba(255,90,70,.25)' : 'rgba(255,180,58,.28)'; ctx.lineWidth = b.r * 2;
+    ctx.beginPath(); b.pts.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)); ctx.stroke();
+    ctx.strokeStyle = blink ? '#ff5a46' : '#fff'; ctx.lineWidth = 6;
+    ctx.beginPath(); b.pts.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)); ctx.stroke();
+    ctx.fillStyle = blink ? '#ff5a46' : '#fff';
+    b.pts.forEach(q => { ctx.beginPath(); ctx.arc(q.x, q.y, 8, 0, 7); ctx.fill(); });
+  }
+
+  if (flash > 0) { ctx.fillStyle = `rgba(255,60,40,${flash * 1.6})`; ctx.fillRect(0, 0, W, H); }
+  if (healFlash > 0) { ctx.fillStyle = `rgba(255,140,180,${healFlash * .6})`; ctx.fillRect(0, 0, W, H); }
+  ctx.textAlign = 'center'; ctx.font = '800 40px sans-serif';
+  pops.forEach(p => { ctx.fillStyle = p.c; ctx.globalAlpha = Math.max(0, 1 - p.t / .9); ctx.fillText(p.text, p.x, p.y); ctx.globalAlpha = 1; });
+
+  // HUD
+  ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.font = '800 54px sans-serif';
+  ctx.fillText(tPlay.toFixed(1) + ' 秒', 32, 78);
+  ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.font = '600 20px sans-serif'; ctx.fillText(cfg.name, 34, 108);
+  if (state !== 'idle') for (let i = 0; i < cfg.lives; i++) {
+    ctx.fillStyle = i < lives ? '#ff5a46' : 'rgba(255,255,255,.2)';
+    heart(W - 46 - i * 46, 46, 15); ctx.fill();
+  }
+  if (best !== null && state !== 'idle') { ctx.textAlign = 'right'; ctx.fillStyle = '#ffb43a'; ctx.font = '700 24px sans-serif'; ctx.fillText('ベスト ' + fmt(best), W - 32, 100); }
+  ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = '800 40px sans-serif';
+  if (state === 'ready') ctx.fillText(readyT > 1.2 ? '構えて!' : 'スタート!', W / 2, H / 2);
+  if (cameraOK && !body && (state === 'play' || state === 'ready')) {
+    ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(0, H / 2 - 50, W, 100);
+    ctx.fillStyle = '#fff'; ctx.font = '700 30px sans-serif'; ctx.fillText('体が映っていません(一時停止中)', W / 2, H / 2 + 10);
+  }
+  if (!cameraOK && (state === 'play' || state === 'ready')) { ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.font = '600 22px sans-serif'; ctx.fillText('カメラなしモード:マウスを左右に動かして操作', W / 2, H - 24); }
+}
+
+// ============ メインループ ============
+let last = performance.now(), lastVT = -1;
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  if (landmarker && cameraOK && video.readyState >= 2 && video.currentTime !== lastVT) {
+    lastVT = video.currentTime;
+    try { readPose(landmarker.detectForVideo(video, now)); } catch (e) {}
+  }
+  if (state === 'ready' || state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+cv.addEventListener('pointermove', e => { const r = cv.getBoundingClientRect(); mouseX = (e.clientX - r.left) / r.width * W; });
+
+// ============ 設定画面 ============
+function renderModes() {
+  const el = $('modes'); el.innerHTML = '';
+  for (const k in MODES) {
+    const m = MODES[k], b = document.createElement('button'), bs = bestOf(k);
+    b.type = 'button'; b.className = 'mode' + (k === modeKey ? ' on' : ''); b.setAttribute('aria-pressed', k === modeKey);
+    b.innerHTML = `<strong>${m.name}</strong><span>${m.desc}</span><em>${bs ? 'ベスト ' + bs.toFixed(1) + ' 秒' : '記録なし'}</em>`;
+    b.onclick = () => { modeKey = k; renderModes(); };
+    el.appendChild(b);
+  }
+}
+$('optBgm').onchange = e => { opt.bgm = e.target.checked; applyAudio(); };
+$('optSe').onchange  = e => { opt.se = e.target.checked; applyAudio(); };
+$('optVol').oninput  = e => { opt.vol = e.target.value / 100; applyAudio(); };
+function toggleMute() { muted = !muted; if (ac) applyAudio(); else $('mute').textContent = muted ? '音 OFF' : '音 ON'; }
+$('mute').onclick = toggleMute;
+addEventListener('keydown', e => { if (e.key === 'm' || e.key === 'M') toggleMute(); });
+
+async function begin() {
+  btn.disabled = true; btn.textContent = '読み込み中…'; msg.textContent = '';
+  audioInit();
+  if (!camTried) {
+    camTried = true;
+    try {
+      const fs = await FilesetResolver.forVisionTasks(WASM);
+      const opts = d => ({baseOptions: {modelAssetPath: MODEL, delegate: d}, runningMode: 'VIDEO', numPoses: 1});
+      try { landmarker = await PoseLandmarker.createFromOptions(fs, opts('GPU')); }
+      catch (e) { landmarker = await PoseLandmarker.createFromOptions(fs, opts('CPU')); }
+    } catch (e) { console.error(e); }
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({video: {width: 1280, height: 720, facingMode: 'user'}, audio: false});
+      video.srcObject = s; await video.play(); cameraOK = !!landmarker;
+    } catch (e) { console.error(e); }
+  }
+  if (!cameraOK) msg.textContent = 'カメラまたは姿勢モデルを使えなかったため、マウス操作で開始します。';
+  btn.disabled = false; btn.textContent = '開始';
+  ov.classList.add('hide');
+  if (cameraOK) HF.gate(TUTORIAL, reset); else reset();   // はじめては れんしゅう → ゲーム
+}
+btn.onclick = begin;
+$('again').onclick = () => { ov.classList.add('hide'); reset(); };
+$('toMenu').onclick = () => { result.hidden = true; menu.hidden = false; renderModes(); };
+
+// ============ れんしゅう(チュートリアル) と 手で ボタン ============
+const c2s = (p) => { const r = cv.getBoundingClientRect(); return { x: r.left + p.x / W * r.width, y: r.top + p.y / H * r.height }; };
+const TUTORIAL = [
+  {
+    text: "⬅️➡️ よこに うごいて 💗 の したに 入ろう(2かい)",
+    init: (S) => { S.n = 0; S.side = Math.random() < 0.5 ? 0.25 : 0.75; },
+    update: (dt, S) => {
+      const tx = W * S.side, sp = c2s({ x: tx, y: H * 0.15 }), u = HF.u();
+      HF.emoji("💗", sp.x, sp.y, u * 9);
+      HF.ctx.strokeStyle = "rgba(255,180,58,.6)"; HF.ctx.lineWidth = 3; HF.ctx.setLineDash([8, 10]);
+      HF.ctx.beginPath(); HF.ctx.moveTo(sp.x, sp.y + u * 6); HF.ctx.lineTo(sp.x, c2s({ x: tx, y: H }).y); HF.ctx.stroke(); HF.ctx.setLineDash([]);
+      if (slots.sh && body && Math.abs(slots.sh.x - tx) < Math.max(70, shoulderW * 0.6)) {
+        HF.sfx("pop"); HF.burst(sp.x, sp.y, "#ff6b8b"); S.n++; S.side = S.side < 0.5 ? 0.75 : 0.25;
+      }
+      return S.n / 2;
+    },
+  },
+  {
+    text: "⬇️ まっすぐ たってから <b>しゃがんで</b> みよう",
+    init: (S) => { S.base = null; },
+    update: (dt, S) => {
+      if (!slots.sh || !body) return 0;
+      const y = slots.sh.y;
+      S.base = S.base == null ? y : Math.min(S.base + dt * 20, y);   // たっている ときの たかさを おぼえる
+      return HF.hold(S, y > S.base + shoulderW * 0.7, dt, 0.3);
+    },
+  },
+];
+HF.setup({
+  kind: "pose", video, landmarks: () => hfLm,
+  map: (l) => { const r = cv.getBoundingClientRect(); return { x: r.left + (1 - l.x) * r.width, y: r.top + l.y * r.height }; },
+  menu: () => cameraOK && !ov.classList.contains('hide'),
+  buttons: () => Array.from(ov.querySelectorAll('button')).filter((b) => b.offsetParent && !b.disabled),
+});
+
+renderModes();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
